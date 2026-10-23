@@ -6,34 +6,53 @@ separately.
 
 ---
 
-## [1.1.0] — 2026-07-21
+## [1.1.0] — 2026-10-23
 
 ### Added
-- **Docker multi-arch builds**: Images now built for `linux/amd64` and `linux/arm64`
+- **Bottom create buttons**: Create-user and create-group actions now appear below
+  their tables, so long lists no longer require scrolling back to the top.
+- **Upstream sync process**: `scripts/sync-upstream.sh` creates a backup branch and
+  a sync branch, merges `upstream/main`, and runs fork invariant checks.
+  `scripts/verify-fork.sh` guards branding, fork identity, multi-arch Docker, and
+  the Windows test fixes. The new `fork-invariants` CI workflow runs on `mitch-lldap`.
+- **Docker multi-arch builds**: Images are built for `linux/amd64` and `linux/arm64`
   (Raspberry Pi 3B+, 4, 5). Uses Rust cross-compilation via `cross` — no QEMU for
   the heavy compile step.
-- **Docker workflow triggers on release only**: Container images published via
+- **Docker workflow triggers on release only**: Container images are published via
   `ghcr.io/mitchelljfranklin/mitch-lldap` on each release (`v*` tag) or manual
   dispatch. Tags: `latest`, `v{major}`, `v{major}.{minor}`, `v{version}`, SHA, date.
 
-### Fixed
-- **CI noise**: Codecov upload skipped on fork (no `CODECOV_TOKEN` secret).
-- **Docker binary permissions**: `chmod +x` applied to cross-compiled binaries in CI
-  image.
-
 ### Changed
+- **Upstream sync**: Merged `lldap/lldap` through `99c510a`, including:
+  - LDAP user attributes are now persisted when creating users via `ldapadd`.
+  - Primary keys are provisioned for the `metadata` and `memberships` tables.
+  - The prebuilt tarball index now references the correct static assets.
+  - Docker base images move to Debian Trixie with improved build caching.
+  - Docker action dependencies and configuration documentation were refreshed.
+- **Relative asset URLs**: The Docker UI loads `static/...` assets relative to the
+  page base, so LLDAP works behind custom paths.
 - **Documentation overhaul**: README fork notice, "What's the difference" section,
   container image reference. Docs updated with fork URLs, Discord/Twitter links
   removed.
 - **New README**: Complete rewrite — quick-start compose, features table, badge row,
   config reference, side-by-side screenshot layout, curated upstream docs links.
-- **Repository identity**: GitHub URLs point to this fork.
-  `.github/FUNDING.yml` removed. Issue templates point here.
+- **Repository identity**: GitHub URLs point to this fork. `.github/FUNDING.yml`
+  removed. Issue templates point here.
 - **Footer**: Shows `mitch-lldap v{version}` with GitHub link only.
-- **AGENTS.md**: Compact AI agent guide covering branch structure, sync routine,
-  build commands, gotchas, quality gates, and code style.
-- **Dependencies**: 131 packages updated including critical `lettre` CVE fix
-  (TLS hostname verification), `anyhow` unsoundness fix, and yanked `spin` crate.
+- **AGENTS.md**: Compact AI agent guide covering branch structure, the upstream sync
+  process, build commands, gotchas, quality gates, and code style.
+
+### Fixed
+- **CI noise**: Codecov upload skipped on fork (no `CODECOV_TOKEN` secret).
+- **Docker binary permissions**: `chmod +x` applied to cross-compiled binaries in the
+  CI image.
+- **Windows shell scripts**: `.gitattributes` keeps `*.sh` files on LF endings.
+- **Release assets**: Prebuilt tarball `index.html` references the correct paths.
+
+### Security
+- **Dependency security**: 131 packages updated, including the `lettre` TLS hostname
+  verification CVE fix, an `anyhow` unsoundness fix, and removal of the yanked `spin`
+  crate.
 
 ---
 
