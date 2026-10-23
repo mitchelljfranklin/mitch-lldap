@@ -25,9 +25,15 @@ separately.
 - **Documentation overhaul**: README fork notice, "What's the difference" section,
   container image reference. Docs updated with fork URLs, Discord/Twitter links
   removed.
+- **New README**: Complete rewrite — quick-start compose, features table, badge row,
+  config reference, side-by-side screenshot layout, curated upstream docs links.
 - **Repository identity**: GitHub URLs point to this fork.
   `.github/FUNDING.yml` removed. Issue templates point here.
 - **Footer**: Shows `mitch-lldap v{version}` with GitHub link only.
+- **AGENTS.md**: Compact AI agent guide covering branch structure, sync routine,
+  build commands, gotchas, quality gates, and code style.
+- **Dependencies**: 131 packages updated including critical `lettre` CVE fix
+  (TLS hostname verification), `anyhow` unsoundness fix, and yanked `spin` crate.
 
 ---
 
