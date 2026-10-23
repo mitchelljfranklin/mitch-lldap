@@ -1,0 +1,21 @@
+name: Fork invariants
+
+on:
+  push:
+    branches: [ mitch-lldap ]
+  pull_request:
+    branches: [ mitch-lldap ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify fork customizations
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6.0.2
+      - name: Run fork invariant checks
+        run: sh scripts/verify-fork.sh

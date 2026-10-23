@@ -1,6 +1,6 @@
 [package]
 name = "lldap_app"
-version = "1.0.0"
+version = "1.1.0"
 description = "Frontend for LLDAP"
 edition.workspace = true
 include = ["src/**/*", "queries/**/*", "Cargo.toml", "../schema.graphql"]

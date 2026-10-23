@@ -1,117 +1,88 @@
 # AGENTS.md
 
-Fork of [lldap/lldap](https://github.com/lldap/lldap) — Light LDAP server with a WASM frontend.
+Fork of [lldap/lldap](https://github.com/lldap/lldap): a lightweight LDAP server in Rust with a Yew/WASM admin UI. This fork adds branding/theme settings, Bootstrap 5.3, multi-arch Docker images, and fork-specific docs/CI.
 
-## Repo identity
+## Repo and branches
 
-- **Fork owner**: mitchelljfranklin
-- **Fork branch**: `mitch-lldap` (default, protected — requires PRs)
-- **Upstream**: `lldap/lldap` (`upstream` remote, `main` branch)
-- **Container**: `ghcr.io/mitchelljfranklin/mitch-lldap`
-- **Dual README**: `.github/README.md` (fork — displayed on repo) / `README.md` (root — upstream, avoid editing)
+- **`mitch-lldap`** is the default deployment branch (protected, PRs required). Fork-only work branches from it.
+- **`main`** tracks `upstream/main`. Upstream-bound work branches from it and must not include fork-only branding.
+- Container image: `ghcr.io/mitchelljfranklin/mitch-lldap`.
+- Root `README.md` is upstream's; the GitHub-facing fork README is `.github/README.md` — edit the latter.
+- Commit/PR titles follow `tag: imperative sentence` (e.g. `server: ...`, `app: ...`, `docker: ...`).
+- `.github/copilot-instructions.md` is an older upstream-oriented guide; prefer this file when they disagree.
 
-## Branch structure
+## Upstream sync
 
-- **`main`** — tracks `upstream/main`. Fork-only changes should not land here.
-- **`mitch-lldap`** — fork's deployment branch (default, protected — requires PRs).
-- All new features intended for upstream: branch off `main`.
-- All fork-only features: branch off `mitch-lldap`.
-
-## Upstream sync routine
-
-```bash
-git checkout main
-git pull upstream main
-git push origin main
-git checkout mitch-lldap
-git merge main  # resolve conflicts, keep both upstream + fork changes
-cargo build --workspace  # verify merge
-```
-
-## Build & verify
+`mitch-lldap` merges `upstream/main` directly. Do **not** merge `main` into `mitch-lldap` wholesale: `main` carries a deliberately stripped UI for upstream PRs and can remove branding. Sync `main` separately when preparing an upstream PR.
 
 ```sh
-cargo build --workspace          # ~3m, timeout 300s
-cargo test --workspace --lib     # unit tests (integration tests are Unix-only)
-./app/build.sh                   # WASM frontend, ~3m, timeout 300s
-cargo fmt --all --check          # <5s
-cargo clippy --tests --all -- -D warnings  # ~90s, timeout 120s
+sh scripts/sync-upstream.sh
+sh scripts/verify-fork.sh
 ```
 
-**If you change GraphQL types** you must regenerate the schema or CI fails:
+The sync script creates a backup branch and a `chore/sync-upstream-*` branch, merges `upstream/main`, and runs the invariant checks. See `docs/fork-upstream-sync.md` for the conflict policy, rollback steps, and release flow.
+
+## Commands
+
 ```sh
-./export_schema.sh               # ~80s, timeout 120s
+cargo build --workspace                         # full workspace; allow 300s+
+cargo test --workspace --lib                    # unit tests
+cargo test --workspace                          # adds Unix-only integration tests
+cargo test -p lldap --test ldap <test_name>     # one integration test (Unix)
+cargo fmt --all --check
+cargo clippy --tests --all -- -D warnings       # ~90s
+./app/build.sh                                  # WASM frontend; allow 300s+
+./export_schema.sh                              # regenerate schema.graphql
+sh scripts/verify-fork.sh                       # fork customization checks
+cargo run -- run --config-file lldap_config.toml
 ```
-This regenerates `schema.graphql` (checked into git). The `rust.yml` workflow diffs it against a fresh export and fails if stale.
 
-## Gotchas
+- Bare `cargo build` builds only `server` (`default-members = ["server"]`), not the workspace.
+- Toolchain is pinned to **1.91.0** in `rust-toolchain.toml` and CI; do not use newer language features.
 
-- **`default-members = ["server"]`** — bare `cargo build` only builds the server, not the full workspace.
-- **Integration tests are Unix-only** (`#[cfg(unix)]` on all three test binaries). They start LLDAP as a child process using nix signals. Will compile but produce 0 tests on Windows.
-- **Indexmap pinned** in `app/Cargo.toml`: `indexmap = "=1.6.2"` — needed for aHash WASM compatibility. Do not bump.
-- **`yew_form` from git**, not crates.io — pinned to a specific rev: `jfbilodeau/yew_form@4b9fabf`.
-- **`key_seed`**: if set in config, delete any existing `server_key*` files to avoid startup errors.
-- **MSRV**: 1.91.0 (both CI and Cargo.toml `rust-version`).
-- **Codecov job in CI** only runs on `lldap/lldap` — skipped on forks.
-- **Database schema** auto-migrates at startup (SeaORM). No manual migration needed.
-- **Multi-DB**: SQLite (default), PostgreSQL, and MariaDB/MySQL are all supported. Any DB schema or query changes must work across all three backends. SeaORM abstracts most differences, but raw SQL, migration scripts, and conflict handlers must be backend-compatible. Test migrations against all backends when possible.
-- **`Cargo.lock` on Windows** may resolve differently than Linux CI. If `cargo build` fails unexpectedly on Windows, run `cargo update` to refresh the lockfile.
+## Testing quirks
+
+- `server/tests/{ldap,graphql,integrations}.rs` are all `#![cfg(unix)]`. On Windows they compile but run zero tests.
+- Integration tests spawn the real `lldap` binary, bind ports 3890/17170, share the repo-root SQLite file `e2e_test.db` (override with `LLDAP_DATABASE_URL`), and are serialized with `serial_test`.
+- CI runs `cargo test --workspace` on Ubuntu; on Windows use `--lib` for local verification.
+- `.config/nextest.toml` exists, but CI uses plain `cargo test`.
+
+## GraphQL and frontend
+
+- `schema.graphql` is checked in and consumed at compile time by `app`, `migration-tool`, and `server/tests` (`schema_path = "../schema.graphql"`). After any GraphQL type change run `./export_schema.sh`; CI regenerates and diffs it. Update affected `.graphql` query files too.
+- `app` is a Yew 0.19 WASM cdylib. `./app/build.sh` needs `wasm-pack`, `gzip`, and a POSIX shell (Git Bash/WSL on Windows); it writes `app/pkg`, including the gzipped wasm.
+- The server serves assets from `assets_path` (default `./app`), so start it from the repo root.
+- `app/index.html` (local dev, CDN assets) and `app/index_local.html` (Docker, `/static` assets) are near-duplicates; mirror markup changes in both.
+- Do not bump `indexmap = "=1.6.2"` in `app/Cargo.toml` (aHash WASM issue). `yew_form`/`yew_form_derive` come from a pinned git rev, not crates.io.
+
+## Server and configuration
+
+- Subcommands: `run`, `healthcheck`, `export_graphql_schema`, `create_schema`, `send_test_email`.
+- LLDAP reads `lldap_config.toml` (gitignored; start from `lldap_config.docker_template.toml`). Root `config.toml` only contains Cargo linker settings; it is not an LLDAP config.
+- Precedence: built-in defaults < TOML file < `LLDAP_*` env < CLI. Nested keys use `__`, e.g. `LLDAP_SMTP_OPTIONS__SERVER`; unknown `LLDAP_*` variables only warn.
+- `jwt_secret` is always required; `ldap_user_pass` is required when creating or resetting the admin user. If `key_seed` is set and a `server_key` file exists, startup aborts; delete the file.
+- DB schema auto-migrates at startup (SeaORM). SQLite is default; PostgreSQL and MariaDB/MySQL are supported. Any query, migration, or conflict-handler change must work on all three.
+- Ports: LDAP 3890, HTTP 17170, LDAPS 6360 (disabled).
 
 ## Architecture
 
-```
-server/                → lldap binary (Actix-web + LDAP + GraphQL)
-app/                   → lldap_app WASM frontend (Yew, cdylib)
-migration-tool/        → lldap_migration_tool (OpenLDAP migration CLI)
-set-password/          → lldap_set_password CLI
-crates/auth            → OPAQUE protocol
-crates/ldap            → LDAP server implementation
-crates/graphql-server  → Juniper GraphQL
-crates/sql-backend-handler → SeaORM DB layer
-crates/frontend-options    → shared Options struct (password_reset_enabled)
-```
+- `server/` — `lldap` binary: CLI/config, Actix HTTP + GraphQL, LDAP listener.
+- `crates/graphql-server` → `crates/domain`, `domain-handlers`, `domain-model` → `crates/sql-backend-handler` (SeaORM).
+- Supporting crates: `access-control`, `auth`/`opaque-handler` (OPAQUE), `ldap`, `validation`, `frontend-options`, `test-utils`.
+- `app/` — Yew WASM UI; `migration-tool/` — OpenLDAP import CLI; `set-password/` — password CLI.
 
-Default ports: LDAP 3890, HTTP 17170, LDAPS 6360 (disabled).
+## Docker and CI
 
-## Fork vs upstream
+- Root `Dockerfile` builds everything from source with cargo-chef. Release images use `.github/workflows/Dockerfile.ci.multiarch` with prebuilt amd64/arm64 artifacts.
+- `docker-build-fork.yml` runs only on published releases or manual dispatch and pushes `ghcr.io/mitchelljfranklin/mitch-lldap`.
+- `rust.yml` runs on pushes to `main`/`mitch-lldap` and PRs: build, tests + schema diff, clippy, fmt. The coverage job only runs in `lldap/lldap`, not this fork.
+- `fork-invariants.yml` runs on `mitch-lldap` pushes/PRs to catch lost branding, fork identity, or Windows test fixes.
+- Local container test: `docker run -e LLDAP_JWT_SECRET=secret -e LLDAP_LDAP_USER_PASS=pass -p 17170:17170 -v lldap_data:/data mitch-lldap:test`.
 
-The `mitch-lldap` branch adds:
-- Branding/admin settings UI (app name, logo, colors, theme)
-- Bootstrap 5.3.3 upgrade + dark mode + CSS design tokens
-- Multi-arch Docker build (amd64, arm64 via cross-compilation)
-- Fork-specific CI, docs, footer, and repo identity
+## Conventions and quality gates
 
-The `main` branch tracks upstream and has a stripped-down Bootstrap upgrade ready for PR.
-
-## Docker
-
-- Root `Dockerfile` — standalone multi-stage build, compiles everything from source
-- `.github/workflows/Dockerfile.ci.multiarch` — CI image, pre-built binaries via `cross`
-- Fork workflow triggers on **release published** or **manual dispatch** only
-- For local Docker dev: `docker run -e LLDAP_JWT_SECRET=secret -e LLDAP_LDAP_USER_PASS=pass -p 17170:17170 -v lldap_data:/data mitch-lldap:test`
-
-## CI
-
-- **`rust.yml`** — build, test, clippy, fmt, and GraphQL schema check. Triggers on `main` and `mitch-lldap` branches.
-- **`docker-build-fork.yml`** — container publish to `ghcr.io/mitchelljfranklin/mitch-lldap`. Triggers on release published or manual dispatch.
-
-## Quality gates
-
-Before considering work done:
-
-- **No stubs.** No `TODO`/`FIXME`, no empty/throwing function bodies, no dead or commented-out code. Intentional empty states must be clearly labelled.
-- **Lint + build clean.** `cargo fmt --all --check`, `cargo clippy --tests --all -- -D warnings`, and `cargo build --workspace` must pass. For frontend changes, `./app/build.sh` must also pass.
-- **Types are explicit.** No `unwrap()` or `expect()` without justification. Validate external input. Use `thiserror` for structured errors.
-- **Tests pass.** `cargo test --workspace --lib` must pass. Integration tests (Unix-only) pass on CI.
-
-## Code style
-
-- **No comments unless explicitly requested.** Clarity comes from names and structure, not comments. When a comment is requested, explain *why*, not *what*.
-- **Full descriptive names.** `calculate_display_name`, not `calc_nm`. Variables are noun phrases, functions are verb phrases. Single-letter variables only in closure parameters (`|x|`) and loop indices.
-- **One thought per line.** Break chained operations into intermediate variables with descriptive names. No dense one-liners.
-- **Early returns over deep nesting.** Use guard clauses and `let-else`. Functions should read top-to-bottom.
-- **No over-engineered abstractions.** Don't create a trait for a two-method type used once. Every abstraction must reduce total cognitive load.
-- **Duplicate code is noise.** If logic appears in two places, extract it into a shared location.
-- **Match existing conventions.** When editing a file, mimic its import style, error handling pattern, and naming. Don't introduce a different pattern in the same module.
-- **Human-readable output.** Generated code should look like a human wrote it — clean formatting, logical grouping, descriptive names, and no mechanical boilerplate patterns. If it looks generated, it needs more polish.
-- **Multi-DB awareness.** Any change touching database queries, migrations, or schema must compile and pass tests across SQLite, PostgreSQL, and MariaDB/MySQL. Avoid backend-specific SQL or SeaORM API calls that don't work uniformly.
+- No stubs: no `TODO`/`FIXME`, empty bodies, or dead/commented-out code.
+- No comments unless explicitly requested.
+- No `unwrap()`/`expect()` without justification; validate external input and use `thiserror` for structured errors.
+- Use descriptive names and early returns; match the surrounding module's import/error/naming style.
+- Before finishing: `cargo fmt --all --check`, `cargo clippy --tests --all -- -D warnings`, `cargo build --workspace`, `cargo test --workspace --lib`, and `sh scripts/verify-fork.sh` must pass. Frontend changes also require `./app/build.sh`; GraphQL changes also require `./export_schema.sh`.
