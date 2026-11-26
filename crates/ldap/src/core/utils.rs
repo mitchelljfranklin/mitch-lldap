@@ -53,8 +53,9 @@ where
 }
 
 pub fn parse_distinguished_name(dn: &str) -> LdapResult<Vec<(String, String)>> {
-    assert!(dn == dn.to_ascii_lowercase());
-    dn.split(',')
+    let normalized_dn = dn.to_ascii_lowercase();
+    normalized_dn
+        .split(',')
         .map(|s| make_dn_pair(s.split('=').map(str::trim).map(String::from)))
         .collect()
 }
@@ -540,6 +541,16 @@ mod tests {
             parse_distinguished_name(" ou  = people , dc = example , dc =  com ")
                 .expect("parsing failed"),
             parsed_dn
+        );
+        assert_eq!(
+            parse_distinguished_name("uid=Bob,ou=People,dc=Example,dc=COM")
+                .expect("parsing failed"),
+            vec![
+                ("uid".to_string(), "bob".to_string()),
+                ("ou".to_string(), "people".to_string()),
+                ("dc".to_string(), "example".to_string()),
+                ("dc".to_string(), "com".to_string()),
+            ]
         );
     }
 
