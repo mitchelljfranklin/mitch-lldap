@@ -27,13 +27,24 @@ where
 {
     use futures_util::SinkExt;
     let msg = msg.context("while receiving LDAP op")?;
-    for control in msg.ctrl.iter() {
-        if let LdapControl::Unknown { oid, .. } = control {
-            info!("Received unknown control: {}, ignoring", oid);
+    let LdapMsg { msgid, op, ctrl } = msg;
+    for control in &ctrl {
+        if let LdapControl::Unknown {
+            oid, criticality, ..
+        } = control
+        {
+            if *criticality {
+                info!("Rejecting unknown critical control: {}", oid);
+            } else {
+                info!("Received unknown control: {}, ignoring", oid);
+            }
         }
     }
-    debug!(?msg);
-    match session.handle_ldap_message(msg.op).await {
+    debug!(?op, ?ctrl);
+    let paged_results_requested = ctrl
+        .iter()
+        .any(|control| matches!(control, LdapControl::SimplePagedResults { .. }));
+    match session.handle_ldap_message_with_controls(op, &ctrl).await {
         None => return Ok(false),
         Some(result) => {
             if result.is_empty() {
@@ -42,16 +53,17 @@ where
             let results: i64 = result.len().try_into().unwrap();
             for response in result.into_iter() {
                 debug!(?response);
-                let controls = if matches!(response, LdapOp::SearchResultDone(_)) {
-                    vec![LdapControl::SimplePagedResults {
-                        size: results - 1, // Avoid counting SearchResultDone as a result
-                        cookie: vec![],
-                    }]
-                } else {
-                    vec![]
-                };
+                let controls =
+                    if paged_results_requested && matches!(response, LdapOp::SearchResultDone(_)) {
+                        vec![LdapControl::SimplePagedResults {
+                            size: results - 1, // Avoid counting SearchResultDone as a result
+                            cookie: vec![],
+                        }]
+                    } else {
+                        vec![]
+                    };
                 resp.send(LdapMsg {
-                    msgid: msg.msgid,
+                    msgid,
                     op: response,
                     ctrl: controls,
                 })

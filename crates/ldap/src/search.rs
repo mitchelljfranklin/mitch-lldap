@@ -9,7 +9,7 @@ use ldap3_proto::{
     LdapFilter, LdapPartialAttribute, LdapResultCode, LdapSearchResultEntry, LdapSearchScope,
     proto::{
         LdapDerefAliases, LdapOp, LdapResult as LdapResultOp, LdapSearchRequest,
-        OID_PASSWORD_MODIFY, OID_WHOAMI,
+        LdapSubstringFilter, OID_PASSWORD_MODIFY, OID_WHOAMI,
     },
 };
 use lldap_access_control::UserAndGroupListerBackendHandler;
@@ -299,6 +299,71 @@ pub(crate) fn is_subschema_entry_request(request: &LdapSearchRequest) -> bool {
     request.base == "cn=Subschema" && request.scope == LdapSearchScope::Base
 }
 
+fn ou_entry_values<'a>(attribute: &str, ou: &'a str, dn: &'a str) -> Vec<&'a str> {
+    if attribute.eq_ignore_ascii_case("objectClass") {
+        vec!["top", "organizationalUnit"]
+    } else if attribute.eq_ignore_ascii_case("ou") {
+        vec![ou]
+    } else if attribute.eq_ignore_ascii_case("dn")
+        || attribute.eq_ignore_ascii_case("distinguishedName")
+    {
+        vec![dn]
+    } else {
+        Vec::new()
+    }
+}
+
+fn substring_matches(value: &str, filter: &LdapSubstringFilter) -> bool {
+    let mut remaining = value.to_ascii_lowercase();
+    if let Some(initial) = &filter.initial {
+        let initial = initial.to_ascii_lowercase();
+        if !remaining.starts_with(&initial) {
+            return false;
+        }
+        remaining = remaining[initial.len()..].to_owned();
+    }
+    for part in &filter.any {
+        let part = part.to_ascii_lowercase();
+        let Some(position) = remaining.find(&part) else {
+            return false;
+        };
+        remaining = remaining[position + part.len()..].to_owned();
+    }
+    filter
+        .final_
+        .as_ref()
+        .is_none_or(|final_part| remaining.ends_with(&final_part.to_ascii_lowercase()))
+}
+
+fn filter_matches_ou_entry(filter: &LdapFilter, ou: &str, dn: &str) -> bool {
+    match filter {
+        LdapFilter::And(filters) => filters
+            .iter()
+            .all(|filter| filter_matches_ou_entry(filter, ou, dn)),
+        LdapFilter::Or(filters) => filters
+            .iter()
+            .any(|filter| filter_matches_ou_entry(filter, ou, dn)),
+        LdapFilter::Not(filter) => !filter_matches_ou_entry(filter, ou, dn),
+        LdapFilter::Equality(attribute, expected) => ou_entry_values(attribute, ou, dn)
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case(expected)),
+        LdapFilter::Approx(attribute, expected) => ou_entry_values(attribute, ou, dn)
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case(expected)),
+        LdapFilter::Present(attribute) => !ou_entry_values(attribute, ou, dn).is_empty(),
+        LdapFilter::Substring(attribute, substring) => ou_entry_values(attribute, ou, dn)
+            .iter()
+            .any(|value| substring_matches(value, substring)),
+        LdapFilter::GreaterOrEqual(attribute, expected) => ou_entry_values(attribute, ou, dn)
+            .iter()
+            .any(|value| value.to_ascii_lowercase() >= expected.to_ascii_lowercase()),
+        LdapFilter::LessOrEqual(attribute, expected) => ou_entry_values(attribute, ou, dn)
+            .iter()
+            .any(|value| value.to_ascii_lowercase() <= expected.to_ascii_lowercase()),
+        LdapFilter::Extensible(_) => false,
+    }
+}
+
 async fn do_search_internal(
     ldap_info: &LdapInfo,
     backend_handler: &impl UserAndGroupListerBackendHandler,
@@ -370,13 +435,21 @@ async fn do_search_internal(
             InternalSearchResults::UsersAndGroups(Vec::new(), get_group_list(&filter).await?)
         }
         SearchScope::UserOuOnly | SearchScope::GroupOuOnly => {
-            InternalSearchResults::Raw(vec![LdapOp::SearchResultEntry(LdapSearchResultEntry {
-                dn: request.base.clone(),
-                attributes: vec![LdapPartialAttribute {
-                    atype: "objectClass".to_owned(),
-                    vals: vec![b"top".to_vec(), b"organizationalUnit".to_vec()],
-                }],
-            })])
+            let ou = dn_parts
+                .first()
+                .map(|(_, value)| value.as_str())
+                .unwrap_or_default();
+            if filter_matches_ou_entry(&request.filter, ou, &request.base) {
+                InternalSearchResults::Raw(vec![LdapOp::SearchResultEntry(LdapSearchResultEntry {
+                    dn: request.base.clone(),
+                    attributes: vec![LdapPartialAttribute {
+                        atype: "objectClass".to_owned(),
+                        vals: vec![b"top".to_vec(), b"organizationalUnit".to_vec()],
+                    }],
+                })])
+            } else {
+                InternalSearchResults::Raw(vec![make_search_success()])
+            }
         }
         SearchScope::Unknown => {
             warn!(
@@ -1341,6 +1414,62 @@ mod tests {
         };
         assert_eq!(
             ldap_handler.do_search_or_dse(&request).await,
+            Ok(vec![
+                LdapOp::SearchResultEntry(LdapSearchResultEntry {
+                    dn: "ou=people,dc=example,dc=com".to_owned(),
+                    attributes: vec![LdapPartialAttribute {
+                        atype: "objectClass".to_owned(),
+                        vals: vec![b"top".to_vec(), b"organizationalUnit".to_vec()]
+                    }]
+                }),
+                make_search_success()
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_user_ou_search_filters_apply() {
+        let ldap_handler = setup_bound_readonly_handler(MockTestBackendHandler::new()).await;
+        let base_request = LdapSearchRequest {
+            base: "ou=people,dc=example,dc=com".to_owned(),
+            scope: LdapSearchScope::Base,
+            aliases: LdapDerefAliases::Never,
+            sizelimit: 0,
+            timelimit: 0,
+            typesonly: false,
+            filter: LdapFilter::Present("objectClass".to_owned()),
+            attrs: Vec::new(),
+        };
+
+        assert_eq!(
+            ldap_handler.do_search_or_dse(&base_request).await,
+            Ok(vec![
+                LdapOp::SearchResultEntry(LdapSearchResultEntry {
+                    dn: "ou=people,dc=example,dc=com".to_owned(),
+                    attributes: vec![LdapPartialAttribute {
+                        atype: "objectClass".to_owned(),
+                        vals: vec![b"top".to_vec(), b"organizationalUnit".to_vec()]
+                    }]
+                }),
+                make_search_success()
+            ])
+        );
+
+        let non_matching_request = LdapSearchRequest {
+            filter: LdapFilter::Equality("objectClass".to_owned(), "person".to_owned()),
+            ..base_request.clone()
+        };
+        assert_eq!(
+            ldap_handler.do_search_or_dse(&non_matching_request).await,
+            Ok(vec![make_search_success()])
+        );
+
+        let matching_ou_request = LdapSearchRequest {
+            filter: LdapFilter::Equality("ou".to_owned(), "people".to_owned()),
+            ..base_request
+        };
+        assert_eq!(
+            ldap_handler.do_search_or_dse(&matching_ou_request).await,
             Ok(vec![
                 LdapOp::SearchResultEntry(LdapSearchResultEntry {
                     dn: "ou=people,dc=example,dc=com".to_owned(),

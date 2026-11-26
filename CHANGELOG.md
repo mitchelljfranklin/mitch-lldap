@@ -6,6 +6,34 @@ separately.
 
 ---
 
+## [1.1.1] — 2026-11-26
+
+### Fixed
+- **Stale web assets**: `index.html`, the JS loader, and the WASM bundle are served
+  with `Cache-Control: no-cache`, so an upgrade no longer leaves an old UI in the
+  browser until a hard refresh.
+- **LDAP bind state**: a failed bind now clears the previous authorization on the
+  connection instead of leaving an administrator bound.
+- **Mixed-case DNs**: distinguished names are normalized before parsing, so a
+  Modify request with `uid=Bob,...` returns an LDAP response instead of panicking.
+- **OU base searches**: filters are now evaluated for `ou=people` and `ou=groups`;
+  a filter that does not match returns an empty success instead of a false entry.
+- **Critical LDAP controls**: unsupported critical controls return
+  `unavailableCriticalExtension` rather than being silently ignored.
+- **Paged results**: the paged-results response control is only sent when the client
+  requested it.
+- **Abandon requests**: no response is sent, per RFC 4511.
+- **Unknown extended operations**: return `protocolError` instead of
+  `unwillingToPerform`.
+- **Web UI auth recovery**: the frontend clears stale session cookies and reloads
+  when a proxy redirects an API call or an authenticated request gets a 401.
+
+### Changed
+- **Upstream issue triage**: added `docs/upstream-issue-triage.md` with the current
+  fork backlog, priorities, and upstream-first items.
+
+---
+
 ## [1.1.0] — 2026-10-23
 
 ### Added

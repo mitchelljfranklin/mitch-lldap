@@ -38,7 +38,8 @@ async fn index<Backend>(data: web::Data<AppState<Backend>>) -> actix_web::Result
 
     Ok(file
         .customize()
-        .insert_header((header::CONTENT_TYPE, "text/html; charset=utf-8")))
+        .insert_header((header::CONTENT_TYPE, "text/html; charset=utf-8"))
+        .insert_header((header::CACHE_CONTROL, "no-cache")))
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -90,13 +91,19 @@ async fn main_js_handler<Backend>(
 
     Ok(file
         .customize()
-        .insert_header((header::CONTENT_TYPE, "text/javascript")))
+        .insert_header((header::CONTENT_TYPE, "text/javascript"))
+        .insert_header((header::CACHE_CONTROL, "no-cache")))
 }
 
 async fn wasm_handler<Backend>(
     data: web::Data<AppState<Backend>>,
 ) -> actix_web::Result<impl Responder> {
-    Ok(actix_files::NamedFile::open_async(data.assets_path.join("pkg/lldap_app_bg.wasm")).await?)
+    Ok(
+        actix_files::NamedFile::open_async(data.assets_path.join("pkg/lldap_app_bg.wasm"))
+            .await?
+            .customize()
+            .insert_header((header::CACHE_CONTROL, "no-cache")),
+    )
 }
 
 async fn wasm_handler_compressed<Backend>(
@@ -107,7 +114,8 @@ async fn wasm_handler_compressed<Backend>(
             .await?
             .customize()
             .insert_header(header::ContentEncoding::Gzip)
-            .insert_header((header::CONTENT_TYPE, "application/wasm")),
+            .insert_header((header::CONTENT_TYPE, "application/wasm"))
+            .insert_header((header::CACHE_CONTROL, "no-cache")),
     )
 }
 
