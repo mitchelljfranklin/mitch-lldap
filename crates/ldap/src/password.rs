@@ -511,7 +511,7 @@ pub mod tests {
         assert_eq!(
             ldap_handler.handle_ldap_message(request).await,
             Some(vec![make_extended_response(
-                LdapResultCode::UnwillingToPerform,
+                LdapResultCode::ProtocolError,
                 "Unsupported extended operation: test".to_string(),
             )])
         );

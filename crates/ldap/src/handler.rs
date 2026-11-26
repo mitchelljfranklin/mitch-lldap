@@ -11,10 +11,14 @@ use crate::{
         make_search_error, make_search_request, make_search_success, root_dse_response,
     },
 };
-use ldap3_proto::proto::{
-    LdapAddRequest, LdapBindRequest, LdapBindResponse, LdapCompareRequest, LdapExtendedRequest,
-    LdapExtendedResponse, LdapFilter, LdapModifyRequest, LdapOp, LdapPasswordModifyRequest,
-    LdapResult as LdapResultOp, LdapResultCode, LdapSearchRequest, OID_PASSWORD_MODIFY, OID_WHOAMI,
+use ldap3_proto::{
+    control::LdapControl,
+    proto::{
+        LdapAddRequest, LdapBindRequest, LdapBindResponse, LdapCompareRequest, LdapExtendedRequest,
+        LdapExtendedResponse, LdapFilter, LdapModifyRequest, LdapOp, LdapPasswordModifyRequest,
+        LdapResult as LdapResultOp, LdapResultCode, LdapSearchRequest, OID_PASSWORD_MODIFY,
+        OID_WHOAMI,
+    },
 };
 use lldap_access_control::AccessControlledBackendHandler;
 use lldap_auth::access_control::ValidationResults;
@@ -54,6 +58,50 @@ pub(crate) fn make_modify_response(code: LdapResultCode, message: String) -> Lda
         message,
         referral: vec![],
     })
+}
+
+fn control_is_critical(control: &LdapControl) -> bool {
+    match control {
+        LdapControl::SyncRequest { criticality, .. }
+        | LdapControl::ManageDsaIT { criticality }
+        | LdapControl::PasswordPolicyRequest { criticality }
+        | LdapControl::SearchOptions { criticality, .. }
+        | LdapControl::ShowDeleted { criticality }
+        | LdapControl::SdFlags { criticality, .. }
+        | LdapControl::ExtendedDn { criticality, .. }
+        | LdapControl::Unknown { criticality, .. } => *criticality,
+        _ => false,
+    }
+}
+
+fn control_is_supported(control: &LdapControl) -> bool {
+    matches!(control, LdapControl::SimplePagedResults { .. })
+}
+
+fn make_control_error_response(ldap_op: &LdapOp, message: String) -> Option<LdapOp> {
+    let result = LdapResultOp {
+        code: LdapResultCode::UnavailableCriticalExtension,
+        matcheddn: String::new(),
+        message,
+        referral: Vec::new(),
+    };
+    match ldap_op {
+        LdapOp::BindRequest(_) => Some(LdapOp::BindResponse(LdapBindResponse {
+            res: result,
+            saslcreds: None,
+        })),
+        LdapOp::SearchRequest(_) => Some(LdapOp::SearchResultDone(result)),
+        LdapOp::ModifyRequest(_) => Some(LdapOp::ModifyResponse(result)),
+        LdapOp::AddRequest(_) => Some(LdapOp::AddResponse(result)),
+        LdapOp::DelRequest(_) => Some(LdapOp::DelResponse(result)),
+        LdapOp::CompareRequest(_) => Some(LdapOp::CompareResult(result)),
+        LdapOp::ExtendedRequest(_) => Some(LdapOp::ExtendedResponse(LdapExtendedResponse {
+            res: result,
+            name: None,
+            value: None,
+        })),
+        _ => None,
+    }
 }
 
 pub struct LdapHandler<Backend> {
@@ -166,6 +214,7 @@ impl<Backend: BackendHandler + LoginHandler + OpaqueHandler> LdapHandler<Backend
 
     #[instrument(skip_all, level = "debug", fields(dn = %request.dn))]
     pub async fn do_bind(&mut self, request: &LdapBindRequest) -> Vec<LdapOp> {
+        self.user_info = None;
         let (code, message) =
             match password::do_bind(self.ldap_info, request, self.get_login_handler()).await {
                 Ok(user_id) => {
@@ -229,7 +278,7 @@ impl<Backend: BackendHandler + LoginHandler + OpaqueHandler> LdapHandler<Backend
                 vec![make_extended_response(LdapResultCode::Success, authz_id)]
             }
             _ => vec![make_extended_response(
-                LdapResultCode::UnwillingToPerform,
+                LdapResultCode::ProtocolError,
                 format!("Unsupported extended operation: {}", &request.name),
             )],
         }
@@ -296,6 +345,24 @@ impl<Backend: BackendHandler + LoginHandler + OpaqueHandler> LdapHandler<Backend
     }
 
     pub async fn handle_ldap_message(&mut self, ldap_op: LdapOp) -> Option<Vec<LdapOp>> {
+        self.handle_ldap_message_with_controls(ldap_op, &[]).await
+    }
+
+    pub async fn handle_ldap_message_with_controls(
+        &mut self,
+        ldap_op: LdapOp,
+        controls: &[LdapControl],
+    ) -> Option<Vec<LdapOp>> {
+        if controls
+            .iter()
+            .any(|control| control_is_critical(control) && !control_is_supported(control))
+        {
+            return make_control_error_response(
+                &ldap_op,
+                "Unsupported critical control".to_string(),
+            )
+            .map(|response| vec![response]);
+        }
         Some(match ldap_op {
             LdapOp::BindRequest(request) => self.do_bind(&request).await,
             LdapOp::SearchRequest(request) => self
@@ -328,6 +395,7 @@ impl<Backend: BackendHandler + LoginHandler + OpaqueHandler> LdapHandler<Backend
                 .do_compare(request)
                 .await
                 .unwrap_or_else(|e: LdapError| vec![make_search_error(e.code, e.message)]),
+            LdapOp::AbandonRequest(_) => Vec::new(),
             op => vec![make_extended_response(
                 LdapResultCode::UnwillingToPerform,
                 format!("Unsupported operation: {op:#?}"),
@@ -347,6 +415,7 @@ pub mod tests {
         uuid,
     };
     use lldap_domain_handlers::handler::*;
+    use lldap_domain_model::error::DomainError;
     use lldap_test_utils::{MockTestBackendHandler, setup_default_schema};
     use mockall::predicate::eq;
     use pretty_assertions::assert_eq;
@@ -444,6 +513,121 @@ pub mod tests {
             Some(vec![make_extended_response(
                 LdapResultCode::Success,
                 "dn:uid=test,ou=people,dc=example,dc=com".to_string(),
+            )])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_failed_rebind_clears_authorization() {
+        let mut mock = MockTestBackendHandler::new();
+        mock.expect_bind()
+            .with(eq(BindRequest {
+                name: UserId::new("test"),
+                password: "pass".to_string(),
+            }))
+            .return_once(|_| Ok(()));
+        mock.expect_get_user_groups()
+            .with(eq(UserId::new("test")))
+            .return_once(|_| {
+                let mut groups = HashSet::new();
+                groups.insert(GroupDetails {
+                    group_id: GroupId(42),
+                    display_name: "lldap_admin".into(),
+                    creation_date: chrono::Utc.timestamp_opt(42, 42).unwrap().naive_utc(),
+                    uuid: uuid!("a1a2a3a4b1b2c1c2d1d2d3d4d5d6d7d8"),
+                    attributes: Vec::new(),
+                    modified_date: chrono::Utc.timestamp_opt(42, 42).unwrap().naive_utc(),
+                });
+                Ok(groups)
+            });
+        mock.expect_bind()
+            .with(eq(BindRequest {
+                name: UserId::new("other"),
+                password: "wrong".to_string(),
+            }))
+            .return_once(|_| Err(DomainError::AuthenticationError("bad password".to_string())));
+        setup_default_schema(&mut mock);
+
+        let mut ldap_handler = LdapHandler::new_for_tests(mock, "dc=example,dc=com");
+        let admin_bind = LdapBindRequest {
+            dn: "uid=test,ou=people,dc=example,dc=com".to_string(),
+            cred: LdapBindCred::Simple("pass".to_string()),
+        };
+        assert_eq!(ldap_handler.do_bind(&admin_bind).await, make_bind_success());
+
+        let failed_bind = LdapBindRequest {
+            dn: "uid=other,ou=people,dc=example,dc=com".to_string(),
+            cred: LdapBindCred::Simple("wrong".to_string()),
+        };
+        let bind_response = ldap_handler.do_bind(&failed_bind).await;
+        match bind_response.as_slice() {
+            [LdapOp::BindResponse(response)] => {
+                assert_eq!(response.res.code, LdapResultCode::InvalidCredentials);
+            }
+            other => panic!("unexpected bind response: {other:?}"),
+        }
+
+        let whoami = ldap_handler
+            .handle_ldap_message(LdapOp::ExtendedRequest(LdapWhoamiRequest {}.into()))
+            .await;
+        assert_eq!(
+            whoami,
+            Some(vec![make_extended_response(
+                LdapResultCode::Success,
+                String::new(),
+            )])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unknown_extended_operation_returns_protocol_error() {
+        let mut ldap_handler =
+            LdapHandler::new_for_tests(MockTestBackendHandler::new(), "dc=example,dc=com");
+        let request = LdapOp::ExtendedRequest(LdapExtendedRequest {
+            name: "1.3.6.1.4.1.99999.9.9".to_string(),
+            value: None,
+        });
+        assert_eq!(
+            ldap_handler.handle_ldap_message(request).await,
+            Some(vec![make_extended_response(
+                LdapResultCode::ProtocolError,
+                "Unsupported extended operation: 1.3.6.1.4.1.99999.9.9".to_string(),
+            )])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_abandon_request_has_no_response() {
+        let mut ldap_handler =
+            LdapHandler::new_for_tests(MockTestBackendHandler::new(), "dc=example,dc=com");
+        assert_eq!(
+            ldap_handler
+                .handle_ldap_message(LdapOp::AbandonRequest(999))
+                .await,
+            Some(Vec::new())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unknown_critical_control_is_rejected() {
+        let mut ldap_handler =
+            LdapHandler::new_for_tests(MockTestBackendHandler::new(), "dc=example,dc=com");
+        let request = LdapOp::SearchRequest(make_user_search_request(
+            LdapFilter::Present("objectClass".to_string()),
+            vec!["objectClass"],
+        ));
+        let control = LdapControl::Unknown {
+            oid: "1.3.6.1.4.1.99999.7.1".to_string(),
+            criticality: true,
+            value: None,
+        };
+        assert_eq!(
+            ldap_handler
+                .handle_ldap_message_with_controls(request, &[control])
+                .await,
+            Some(vec![make_search_error(
+                LdapResultCode::UnavailableCriticalExtension,
+                "Unsupported critical control".to_string(),
             )])
         );
     }
