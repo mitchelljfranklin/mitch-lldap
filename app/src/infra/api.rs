@@ -1,4 +1,4 @@
-use super::cookies::set_cookie;
+use super::cookies::{delete_cookie, set_cookie};
 use anyhow::{Context, Result, anyhow};
 use gloo_net::http::{Method, RequestBuilder};
 use graphql_client::GraphQLQuery;
@@ -6,7 +6,7 @@ use lldap_auth::{JWTClaims, login, registration};
 
 use lldap_frontend_options::Options;
 use serde::{Serialize, de::DeserializeOwned};
-use web_sys::RequestCredentials;
+use web_sys::{RequestCredentials, RequestRedirect, ResponseType};
 
 #[derive(Default)]
 pub struct HostService {}
@@ -30,6 +30,18 @@ fn base_url() -> String {
     yew_router::utils::base_url().unwrap_or_default()
 }
 
+fn should_reload_on_unauthorized(url: &str) -> bool {
+    url.contains("/api/graphql") || url.contains("/settings")
+}
+
+fn reload_after_auth_failure() {
+    let _ = delete_cookie("user_id");
+    let _ = delete_cookie("is_admin");
+    if let Some(window) = web_sys::window() {
+        let _ = window.location().reload();
+    }
+}
+
 async fn call_server<Body: Serialize>(
     url: &str,
     body: RequestType<Body>,
@@ -37,7 +49,8 @@ async fn call_server<Body: Serialize>(
 ) -> Result<String> {
     let request_builder = RequestBuilder::new(url)
         .header("Content-Type", "application/json")
-        .credentials(RequestCredentials::SameOrigin);
+        .credentials(RequestCredentials::SameOrigin)
+        .redirect(RequestRedirect::Manual);
     let request = if let RequestType::Post(b) = body {
         request_builder
             .method(Method::POST)
@@ -52,6 +65,12 @@ async fn call_server<Body: Serialize>(
         request_builder.build()?
     };
     let response = request.send().await?;
+    if response.type_() == ResponseType::Opaqueredirect
+        || (response.status() == 401 && should_reload_on_unauthorized(url))
+    {
+        reload_after_auth_failure();
+        return Err(anyhow!("{}[authentication required]", error_message));
+    }
     if response.ok() {
         Ok(response.text().await?)
     } else {
@@ -286,5 +305,29 @@ impl HostService {
             "Could not delete logo",
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_reload_on_unauthorized;
+
+    #[test]
+    fn reloads_only_for_authenticated_endpoints() {
+        assert!(should_reload_on_unauthorized(
+            "https://lldap.example.com/api/graphql"
+        ));
+        assert!(should_reload_on_unauthorized(
+            "https://lldap.example.com/settings"
+        ));
+        assert!(should_reload_on_unauthorized(
+            "https://lldap.example.com/settings/logo"
+        ));
+        assert!(!should_reload_on_unauthorized(
+            "https://lldap.example.com/auth/opaque/login/start"
+        ));
+        assert!(!should_reload_on_unauthorized(
+            "https://lldap.example.com/auth/reset/step1/alice"
+        ));
     }
 }
